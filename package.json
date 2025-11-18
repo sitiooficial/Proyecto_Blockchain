@@ -2,9 +2,9 @@
   "name": "s_v_e_1",
   "version": "1.0.0",
   "description": "",
-  "main": "hardhat_config.js",
+  "main": "server.js",
   "directories": {
-    "test": "test"
+    "test": "backend"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
