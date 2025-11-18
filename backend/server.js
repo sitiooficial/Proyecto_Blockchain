@@ -1,523 +1,673 @@
-// backend.js
-// Backend híbrido JSON + Google Sheets (compatible con tu frontend)
-// Coloca service-account.json en ./google/service-account.json o ajusta env GOOGLE_CREDENTIALS
+// ============================================================
+// 🗳️ SISTEMA DE VOTACIÓN BLOCKCHAIN GASLESS - Backend Node.js
+// Alternativa a Google Apps Script usando Express + Base de Datos
+// ============================================================
 
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs-extra');
+const { v4: uuidv4 } = require('uuid');
+const fs = require('fs').promises;
 const path = require('path');
-const XLSX = require('xlsx');
-const { google } = require('googleapis');
-const http = require('http');
-const { Server } = require('socket.io');
-const { ethers } = require('ethers'); // usado para verifyTx si configuras RPC
+require('dotenv').config();
 
-// ----------------- CONFIG -----------------
-const PORT = process.env.PORT || 3002;
-const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'database.json');
-const PUBLIC_DIR = path.join(__dirname, 'public');
-const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID || '';
-const GOOGLE_CREDENTIALS = process.env.GOOGLE_CREDENTIALS || path.join(__dirname, 'google', 'service-account.json');
-const SHEET_SYNC_TOKEN = process.env.SHEET_SYNC_TOKEN || 'SHEET_TOKEN_123';
-const ADMIN_KEY = process.env.ADMIN_KEY || 'ADMIN_KEY_123';
-const NETWORK = process.env.NETWORK || 'sepolia';
-const RPC_URL = process.env.RPC_URL || ''; // optional for verifyTx
-const DEBUG = (process.env.DEBUG === '1') || true;
+const app = express();
+const PORT = process.env.BACKEND_PORT || 3002;
 
-// ----------------- GOOGLE SHEETS INIT -----------------
-let sheetsAPI = null;
-if (fs.existsSync(GOOGLE_CREDENTIALS) && GOOGLE_SHEET_ID) {
-  try {
-    const auth = new google.auth.GoogleAuth({
-      keyFile: GOOGLE_CREDENTIALS,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets']
-    });
-    sheetsAPI = google.sheets({ version: 'v4', auth });
-    console.log('✅ Google Sheets API inicializada');
-  } catch (e) {
-    console.warn('⚠️ No se pudo inicializar Google Sheets API:', e.message || e);
-    sheetsAPI = null;
-  }
-} else {
-  if (!fs.existsSync(GOOGLE_CREDENTIALS)) console.log('ℹ️ Google credentials no encontradas, Sheets deshabilitado');
-  if (!GOOGLE_SHEET_ID) console.log('ℹ️ GOOGLE_SHEET_ID no configurado, Sheets deshabilitado');
-}
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// helper para append a sheets (no bloquear)
-async function appendToSheet(sheetName, rowArr) {
-  if (!sheetsAPI || !GOOGLE_SHEET_ID) return;
-  try {
-    await sheetsAPI.spreadsheets.values.append({
-      spreadsheetId: GOOGLE_SHEET_ID,
-      range: `${sheetName}!A:Z`,
-      valueInputOption: 'USER_ENTERED',
-      requestBody: { values: [rowArr] }
-    });
-  } catch (err) {
-    console.error('Sheets append error:', err.message || err);
-  }
-}
-
-// helper: leer hoja completa y convertir a objetos usando primera fila como headers
-async function readSheet(sheetName) {
-  if (!sheetsAPI || !GOOGLE_SHEET_ID) return [];
-  try {
-    const resp = await sheetsAPI.spreadsheets.values.get({
-      spreadsheetId: GOOGLE_SHEET_ID,
-      range: `${sheetName}!A:Z`
-    });
-    const rows = resp.data.values || [];
-    if (rows.length <= 1) return [];
-    const headers = rows[0];
-    return rows.slice(1).map(r => {
-      const obj = {};
-      headers.forEach((h, i) => obj[h] = r[i] || '');
-      return obj;
-    });
-  } catch (err) {
-    console.error('readSheet error:', err.message || err);
-    return [];
-  }
-}
-
-// ----------------- LOGGER + SOCKET.IO -----------------
-let io = null;
-function emitLog(type, message, data = null) {
-  const payload = { type, message, data, time: new Date().toISOString() };
-  console.log(`[${type.toUpperCase()}] ${message}`, data || '');
-  if (io) io.emit('system:log', payload);
-  // también guarda a Sheets (no await)
-  appendToSheet('Logs', [new Date().toISOString(), type, message, data ? JSON.stringify(data) : '']).catch(()=>{});
-}
-const logger = {
-  info: (m,d) => emitLog('info', m, d),
-  success: (m,d) => emitLog('success', m, d),
-  warn: (m,d) => emitLog('warn', m, d),
-  error: (m,d) => emitLog('error', m, d),
-  action: (m,d) => emitLog('action', m, d)
+// --- CONFIGURACIÓN ---
+const CONFIG = {
+  ADMIN_ADDRESSES: (process.env.ADMIN_ADDRESSES || '').split(',').map(a => a.toLowerCase().trim()),
+  VOTING_CONTRACT_ADDRESS: process.env.VOTING_CONTRACT_ADDRESS || '',
+  FORWARDER_ADDRESS: process.env.FORWARDER_ADDRESS || '',
+  RELAYER_URL: process.env.RELAYER_URL || 'http://localhost:3001',
+  DATA_DIR: path.join(__dirname, 'data')
 };
 
-// ----------------- EXPRESS + SOCKET.IO -----------------
-const app = express();
-app.use(cors({ origin: '*' }));
-app.use(express.json({ limit: '10mb' }));
+// --- ESTRUCTURA DE DATOS EN MEMORIA ---
+let DATABASE = {
+  voters: [],
+  elections: [],
+  candidates: [],
+  votes: [],
+  blockchain: [],
+  audit: [],
+  stats: {},
+  relayerLog: []
+};
 
-if (fs.existsSync(PUBLIC_DIR)) app.use(express.static(PUBLIC_DIR));
-else console.warn('⚠️ Public dir no existe:', PUBLIC_DIR);
-
-const server = http.createServer(app);
-io = new Server(server, { cors: { origin: '*' } });
-
-io.on('connection', (socket) => {
-  logger.info('Nuevo cliente conectado', { id: socket.id });
-  socket.on('disconnect', () => logger.warn('Cliente desconectado', { id: socket.id }));
-});
-
-// ----------------- JSON DB HELPERS -----------------
-const DEFAULT_DB = { voters: [], elections: [], candidates: [], votes: [], sysActivity: [] };
-
-async function ensureDB() {
-  await fs.ensureFile(DATA_FILE);
+// --- INICIALIZACIÓN ---
+async function initializeSystem() {
   try {
-    const db = await fs.readJson(DATA_FILE);
-    if (!db || typeof db !== 'object') throw new Error('DB inválida');
-    let modified = false;
-    for (const k of Object.keys(DEFAULT_DB)) {
-      if (!Array.isArray(db[k])) { db[k] = DEFAULT_DB[k]; modified = true; }
-    }
-    if (modified) await fs.writeJson(DATA_FILE, db, { spaces: 2 });
-  } catch (err) {
-    await fs.writeJson(DATA_FILE, DEFAULT_DB, { spaces: 2 });
-  }
-}
-
-async function readDB() {
-  await ensureDB();
-  return fs.readJson(DATA_FILE);
-}
-async function writeDB(db) {
-  await fs.ensureFile(DATA_FILE);
-  return fs.writeJson(DATA_FILE, db, { spaces: 2 });
-}
-
-// ----------------- ID helpers -----------------
-function nextId(collection, keyName) {
-  if (!Array.isArray(collection) || collection.length === 0) return 1;
-  const max = Math.max(...collection.map(x => Number(x[keyName] || 0)));
-  return max + 1;
-}
-
-// ----------------- anti-spam -----------------
-const lastCall = {};
-const LIMIT_MS = 800;
-function antiSpam(action) {
-  if (!action) return true;
-  const now = Date.now();
-  if (lastCall[action] && now - lastCall[action] < LIMIT_MS) {
-    return false;
-  }
-  lastCall[action] = now;
-  return true;
-}
-
-// ----------------- SYNC HELPERS (JSON -> Sheets) -----------------
-async function syncAllToSheets() {
-  if (!sheetsAPI || !GOOGLE_SHEET_ID) return { success: false, error: 'Sheets not configured' };
-  try {
-    const db = await readDB();
-
-    // Write headers + rows by replacing entire sheet (cheaper to update ranges)
-    // For simple use-case we will clear and write values for each sheet
-    async function writeSheet(name, rows) {
-      const headers = rows.length ? Object.keys(rows[0]) : [];
-      const values = [headers, ...rows.map(r => headers.map(h => r[h] || ''))];
-      await sheetsAPI.spreadsheets.values.clear({ spreadsheetId: GOOGLE_SHEET_ID, range: `${name}!A:Z` });
-      if (values.length > 1) {
-        await sheetsAPI.spreadsheets.values.update({
-          spreadsheetId: GOOGLE_SHEET_ID,
-          range: `${name}!A1`,
-          valueInputOption: 'USER_ENTERED',
-          requestBody: { values }
-        });
-      } else {
-        // still write headers if none
-        if (headers.length) {
-          await sheetsAPI.spreadsheets.values.update({
-            spreadsheetId: GOOGLE_SHEET_ID,
-            range: `${name}!A1`,
-            valueInputOption: 'USER_ENTERED',
-            requestBody: { values }
-          });
-        }
-      }
-    }
-
-    await writeSheet('Votantes', db.voters);
-    await writeSheet('Elecciones', db.elections);
-    await writeSheet('Candidatos', db.candidates);
-    await writeSheet('Votos', db.votes);
-    await writeSheet('SysActivity', db.sysActivity || []);
-
-    logger.success('Sync completo a Google Sheets', { counts: {
-      voters: db.voters.length, elections: db.elections.length, candidates: db.candidates.length, votes: db.votes.length }});
-    return { success: true };
-  } catch (err) {
-    logger.error('syncAllToSheets failed', { error: err.message || String(err) });
-    return { success: false, error: err.message || String(err) };
-  }
-}
-
-// ----------------- API CENTRAL (/api) -----------------
-app.post('/api', async (req, res) => {
-  const action = req.body && req.body.action;
-  logger.action(`API → ${action}`);
-
-  // anti-spam
-  if (!antiSpam(action)) {
-    logger.warn('Spam bloqueado', { action });
-    return res.status(429).json({ success: false, error: 'Too many requests' });
-  }
-
-  try {
-    const db = await readDB();
-
-    // ---------- registerVoter ----------
-    if (action === 'registerVoter') {
-      const { walletAddress, name, idNumber, email, ipAddress } = req.body || {};
-      if (!walletAddress || !name || !idNumber) return res.json({ success: false, error: 'Campos incompletos' });
-
-      const walletLower = String(walletAddress).toLowerCase();
-      if (db.voters.find(v => String(v.Wallet || '').toLowerCase() === walletLower))
-        return res.json({ success: false, error: 'Wallet ya registrada' });
-
-      const VoterID = nextId(db.voters, 'VoterID');
-      const voter = { VoterID, Wallet: walletAddress, Name: name, IDNumber: idNumber, Email: email || '', RegisteredAt: new Date().toISOString(), IP: ipAddress || '' };
-
-      db.voters.push(voter);
-      await writeDB(db);
-
-      // append to sheet
-      appendToSheet('Votantes', [voter.VoterID, voter.Wallet, voter.Name, voter.IDNumber, voter.Email, voter.RegisteredAt, voter.IP]).catch(()=>{});
-
-      logger.success('Votante registrado', voter);
-      if (io) io.emit('voter:registered', voter);
-      return res.json({ success: true, voter });
-    }
-
-    // ---------- getActiveElections ----------
-    if (action === 'getActiveElections') {
-      const now = Date.now();
-      const active = (db.elections || []).filter(e => {
-        const start = e.StartDate ? new Date(e.StartDate).getTime() : -Infinity;
-        const end = e.EndDate ? new Date(e.EndDate).getTime() : Infinity;
-        return start <= now && now <= end;
+    // Crear directorio de datos si no existe
+    await fs.mkdir(CONFIG.DATA_DIR, { recursive: true });
+    
+    // Cargar datos existentes o crear nuevos
+    await loadDatabase();
+    
+    // Crear bloque génesis si no existe
+    if (DATABASE.blockchain.length === 0) {
+      DATABASE.blockchain.push({
+        timestamp: new Date().toISOString(),
+        action: 'GENESIS',
+        details: { message: 'Sistema inicializado' },
+        hash: uuidv4(),
+        blockNumber: 0
       });
-      return res.json({ success: true, elections: active });
     }
-
-    // ---------- getCandidates ----------
-    if (action === 'getCandidates') {
-      const electionId = req.body.electionId;
-      const list = (db.candidates || []).filter(c => String(c.ElectionID) === String(electionId));
-      return res.json({ success: true, candidates: list });
-    }
-
-    // ---------- createElection ----------
-    if (action === 'createElection') {
-      const id = nextId(db.elections, 'ElectionID');
-      const e = {
-        ElectionID: id,
-        Title: req.body.title || `Elección ${id}`,
-        Description: req.body.description || '',
-        StartDate: req.body.startDate || null,
-        EndDate: req.body.endDate || null,
-        CreatedAt: new Date().toISOString(),
-        TotalVotes: 0
-      };
-      db.elections.push(e);
-      await writeDB(db);
-
-      appendToSheet('Elecciones', [e.ElectionID, e.Title, e.Description, e.StartDate || '', e.EndDate || '', e.CreatedAt, e.TotalVotes]).catch(()=>{});
-
-      logger.success('Elección creada', e);
-      if (io) io.emit('election:created', e);
-      return res.json({ success: true, election: e });
-    }
-
-    // ---------- addCandidate ----------
-    if (action === 'addCandidate') {
-      if (!req.body || !req.body.electionId || !req.body.name) return res.json({ success: false, error: 'electionId y name requeridos' });
-      const id = nextId(db.candidates, 'CandidateID');
-      const c = { CandidateID: id, ElectionID: Number(req.body.electionId), Name: req.body.name, Party: req.body.party || '', Votes: 0, CreatedAt: new Date().toISOString() };
-      db.candidates.push(c);
-      await writeDB(db);
-
-      appendToSheet('Candidatos', [c.CandidateID, c.ElectionID, c.Name, c.Party, c.Votes, c.CreatedAt]).catch(()=>{});
-
-      logger.success('Candidato agregado', c);
-      if (io) io.emit('candidate:added', c);
-      return res.json({ success: true, candidate: c });
-    }
-
-    // ---------- castVote ----------
-    if (action === 'castVote') {
-      const { walletAddress, electionId, candidateId } = req.body || {};
-      if (!walletAddress || !electionId || !candidateId) return res.json({ success: false, error: 'Faltan datos' });
-
-      const walletLower = String(walletAddress).toLowerCase();
-      if ((db.votes || []).find(v => String(v.Wallet || '').toLowerCase() === walletLower && String(v.ElectionID) === String(electionId)))
-        return res.json({ success: false, error: 'Ya votó' });
-
-      const VoteID = nextId(db.votes, 'VoteID');
-      const vote = { VoteID, Wallet: walletAddress, ElectionID: Number(electionId), CandidateID: Number(candidateId), Timestamp: new Date().toISOString() };
-      db.votes.push(vote);
-
-      // increment candidate and election counts
-      const cand = db.candidates.find(c => String(c.CandidateID) === String(candidateId));
-      if (cand) cand.Votes = (cand.Votes || 0) + 1;
-      const elect = db.elections.find(e => String(e.ElectionID) === String(electionId));
-      if (elect) elect.TotalVotes = (elect.TotalVotes || 0) + 1;
-
-      // write db
-      await writeDB(db);
-
-      // append to sheets
-      appendToSheet('Votos', [vote.VoteID, vote.Wallet, vote.ElectionID, vote.CandidateID, vote.Timestamp]).catch(()=>{});
-
-      logger.success('Voto registrado', vote);
-      if (io) io.emit('vote:cast', vote);
-
-      // record system activity (for charts)
-      const activity = { time: new Date().toISOString(), type: 'vote', data: JSON.stringify({ electionId, candidateId }) };
-      db.sysActivity = db.sysActivity || [];
-      db.sysActivity.push(activity);
-      await writeDB(db);
-      appendToSheet('SysActivity', [activity.time, activity.type, activity.data]).catch(()=>{});
-
-      return res.json({ success: true, vote });
-    }
-
-    // ---------- getResults ----------
-    if (action === 'getResults') {
-      const electionId = req.body.electionId;
-      if (!electionId) return res.json({ success: false, error: 'electionId required' });
-      const election = db.elections.find(e => String(e.ElectionID) === String(electionId));
-      if (!election) return res.json({ success: false, error: 'Election not found' });
-      const candidates = db.candidates.filter(c => String(c.ElectionID) === String(electionId))
-        .map(c => ({ name: c.Name, party: c.Party, votes: Number(c.Votes || 0) }));
-      const totalVotes = Number(election.TotalVotes || 0);
-      const withPct = candidates.map(c => ({ ...c, percentage: totalVotes ? (c.votes / totalVotes) * 100 : 0 }));
-      return res.json({ success: true, election: { title: election.Title, totalVotes }, candidates: withPct });
-    }
-
-    // ---------- getStats ----------
-    if (action === 'getStats') {
-      const totals = { totalVoters: db.voters.length, totalElections: db.elections.length, totalVotes: db.votes.length, totalCandidates: db.candidates.length };
-      return res.json({ success: true, stats: totals });
-    }
-
-    // ---------- getChartData ----------
-    // type: votersByDay | candidatesByElection | participation | votesHistory | activityPerMinute
-    if (action === 'getChartData') {
-      const type = req.body.type;
-      if (type === 'votersByDay') {
-        // count registrations grouped by day (YYYY-MM-DD)
-        const map = {};
-        (db.voters || []).forEach(v => {
-          const day = v.RegisteredAt ? (new Date(v.RegisteredAt).toISOString().slice(0,10)) : (new Date().toISOString().slice(0,10));
-          map[day] = (map[day] || 0) + 1;
-        });
-        const labels = Object.keys(map).sort();
-        const data = labels.map(l => map[l]);
-        return res.json({ success: true, labels, data });
-      }
-
-      if (type === 'candidatesByElection') {
-        // return { electionId, title, candidates: [{name,votes}] } per election
-        const out = (db.elections || []).map(e => {
-          const cands = (db.candidates || []).filter(c => String(c.ElectionID) === String(e.ElectionID)).map(c => ({ name: c.Name, votes: Number(c.Votes || 0) }));
-          return { electionId: e.ElectionID, title: e.Title, candidates: cands };
-        });
-        return res.json({ success: true, data: out });
-      }
-
-      if (type === 'participation') {
-        // participation = totalVotes / totalVoters * 100 per election
-        const out = (db.elections || []).map(e => {
-          const votersCount = db.voters.length || 0;
-          const participation = votersCount ? ((Number(e.TotalVotes||0) / votersCount) * 100) : 0;
-          return { electionId: e.ElectionID, title: e.Title, participation };
-        });
-        return res.json({ success: true, data: out });
-      }
-
-      if (type === 'votesHistory') {
-        // return counts per day of votes
-        const map = {};
-        (db.votes || []).forEach(v => {
-          const day = v.Timestamp ? (new Date(v.Timestamp).toISOString().slice(0,10)) : (new Date().toISOString().slice(0,10));
-          map[day] = (map[day] || 0) + 1;
-        });
-        const labels = Object.keys(map).sort();
-        const data = labels.map(l => map[l]);
-        return res.json({ success: true, labels, data });
-      }
-
-      if (type === 'activityPerMinute') {
-        // last 60 minutes activity counts (from sysActivity)
-        const now = Date.now();
-        const buckets = {};
-        for (let i = 0; i < 60; i++) {
-          const t = new Date(now - (59 - i) * 60000);
-          const label = `${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}`;
-          buckets[label] = 0;
-        }
-        (db.sysActivity || []).forEach(a => {
-          const m = new Date(a.time);
-          const label = `${m.getHours().toString().padStart(2,'0')}:${m.getMinutes().toString().padStart(2,'0')}`;
-          if (label in buckets) buckets[label] += 1;
-        });
-        const labels = Object.keys(buckets);
-        const data = labels.map(l => buckets[l]);
-        return res.json({ success: true, labels, data });
-      }
-
-      return res.json({ success: false, error: 'Tipo no soportado' });
-    }
-
-    // unknown action
-    return res.json({ success: false, error: 'Acción no soportada' });
+    
+    await updateStats();
+    await saveDatabase();
+    
+    console.log('✅ Sistema inicializado correctamente');
+    return { success: true, message: '✅ Sistema inicializado correctamente' };
   } catch (err) {
-    logger.error('Error en API', { error: err.message || String(err) });
-    return res.json({ success: false, error: err.message || String(err) });
+    console.error('Error inicializando sistema:', err);
+    return { success: false, error: err.message };
   }
-});
+}
 
-// ----------------- ADMIN / DB ROUTES -----------------
-app.get('/db/all', async (_, res) => {
+// --- PERSISTENCIA DE DATOS ---
+async function saveDatabase() {
   try {
-    const db = await readDB();
-    return res.json({ success: true, data: db });
+    const dbPath = path.join(CONFIG.DATA_DIR, 'database.json');
+    await fs.writeFile(dbPath, JSON.stringify(DATABASE, null, 2));
   } catch (err) {
-    console.error('/db/all error', err);
-    return res.status(500).json({ success: false, error: err.message || String(err) });
+    console.error('Error guardando base de datos:', err);
   }
-});
+}
 
-app.post('/db/reset', async (req, res) => {
+async function loadDatabase() {
   try {
-    const body = req.body || {};
-    if (String(body.adminKey) !== ADMIN_KEY) return res.json({ success: false, error: 'adminKey inválido' });
-    await fs.writeJson(DATA_FILE, DEFAULT_DB, { spaces: 2 });
-    logger.warn('DB reseteada por admin');
-    return res.json({ success: true, message: 'DB reseteada' });
+    const dbPath = path.join(CONFIG.DATA_DIR, 'database.json');
+    const data = await fs.readFile(dbPath, 'utf8');
+    DATABASE = JSON.parse(data);
+    console.log('✅ Base de datos cargada');
   } catch (err) {
-    return res.json({ success: false, error: err.message || String(err) });
+    console.log('📝 Creando nueva base de datos');
+    // Si no existe, se usará la estructura por defecto
   }
-});
+}
 
-// ---------- EXPORT CSV/XLSX (local fallback and sheets fallback) ----------
-app.get('/export/csv/:sheet', async (req, res) => {
+// --- REGISTRAR VOTANTE ---
+function registerVoter(data) {
   try {
-    const sheetName = req.params.sheet;
-    let rows = [];
-    // prefer readSheet (Google Sheets) if available
-    rows = await readSheet(sheetName).catch(()=>[]);
-    if (!rows || rows.length === 0) {
-      const db = await readDB();
-      rows = db[sheetName] || [];
+    const wallet = (data.walletAddress || data.wallet || '').toLowerCase().trim();
+    const name = (data.name || '').trim();
+    const idNumber = (data.idNumber || data.dni || '').trim();
+    const email = (data.email || '').trim();
+
+    // Validaciones
+    if (!wallet || !name || !idNumber) {
+      throw new Error('Datos incompletos: wallet, nombre y DNI son obligatorios');
     }
-    if (!rows || rows.length === 0) return res.send('');
-    const headers = Object.keys(rows[0]);
-    const csv = [headers.join(','), ...rows.map(r => headers.map(h => `"${String(r[h]||'').replace(/"/g,'""')}"`).join(','))].join('\n');
-    res.setHeader('Content-Disposition', `attachment; filename="${sheetName}.csv"`);
-    res.setHeader('Content-Type', 'text/csv');
-    return res.send(csv);
-  } catch (err) {
-    console.error('CSV export error', err);
-    return res.status(500).json({ success: false, error: err.message || String(err) });
-  }
-});
 
-app.get('/export/xlsx/:sheet', async (req, res) => {
-  try {
-    const sheetName = req.params.sheet;
-    let rows = await readSheet(sheetName).catch(()=>[]);
-    if (!rows || rows.length === 0) {
-      const db = await readDB();
-      rows = db[sheetName] || [];
+    if (!wallet.match(/^0x[a-fA-F0-9]{40}$/)) {
+      throw new Error('Dirección de wallet inválida');
     }
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.json_to_sheet(rows);
-    XLSX.utils.book_append_sheet(wb, ws, sheetName);
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-    res.setHeader('Content-Disposition', `attachment; filename="${sheetName}.xlsx"`);
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    return res.send(buffer);
-  } catch (err) {
-    console.error('XLSX export error', err);
-    return res.status(500).json({ success: false, error: err.message || String(err) });
-  }
-});
 
-// ---------- SYNC endpoint (protected by token) ----------
-app.post('/db/sync-to-sheets', async (req, res) => {
+    // Verificar si ya existe
+    const existing = DATABASE.voters.find(v => v.walletAddress.toLowerCase() === wallet);
+    if (existing) {
+      throw new Error('Votante ya registrado con esta wallet');
+    }
+
+    // Crear votante
+    const voter = {
+      walletAddress: wallet,
+      name,
+      idNumber,
+      email,
+      registeredAt: new Date().toISOString(),
+      status: 'Activo'
+    };
+
+    DATABASE.voters.push(voter);
+    logBlockchain('registerVoter', { wallet, name });
+    logAudit('registerVoter', wallet, { name, idNumber }, 'success');
+    updateStats();
+    saveDatabase();
+
+    return { success: true, message: '✅ Votante registrado correctamente', wallet };
+  } catch (err) {
+    logAudit('registerVoter', data.walletAddress || 'unknown', data, 'error', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+// --- CREAR ELECCIÓN ---
+function createElection(data) {
   try {
-    const token = (req.body && req.body.token) || req.query.token;
-    if (token !== SHEET_SYNC_TOKEN) return res.status(403).json({ success: false, error: 'token inválido' });
-    const r = await syncAllToSheets();
-    return res.json(r);
-  } catch (err) {
-    console.error('sync endpoint error', err);
-    return res.json({ success: false, error: err.message || String(err) });
-  }
-});
+    const admin = (data.adminAddress || '').toLowerCase().trim();
+    const title = (data.title || '').trim();
+    const description = (data.description || '').trim();
+    const startDate = data.startDate || '';
+    const endDate = data.endDate || '';
 
-// ----------------- START SERVER -----------------
-(async () => {
-  await ensureDB();
-  server.listen(PORT, () => {
-    logger.success(`🚀 Backend listo en http://localhost:${PORT}`);
-    logger.info(`Sheets: ${sheetsAPI ? 'enabled' : 'disabled'}`);
+    // Validaciones
+    if (!admin || !title) {
+      throw new Error('Dirección de admin y título son obligatorios');
+    }
+
+    if (!CONFIG.ADMIN_ADDRESSES.includes(admin)) {
+      throw new Error('No autorizado: dirección no es admin');
+    }
+
+    // Crear elección
+    const electionId = DATABASE.elections.length + 1;
+    const election = {
+      electionId,
+      title,
+      description,
+      startDate,
+      endDate,
+      status: 'Activa',
+      totalVotes: 0,
+      createdAt: new Date().toISOString(),
+      contractAddress: CONFIG.VOTING_CONTRACT_ADDRESS
+    };
+
+    DATABASE.elections.push(election);
+    logBlockchain('createElection', { admin, title, electionId });
+    logAudit('createElection', admin, { title, electionId }, 'success');
+    updateStats();
+    saveDatabase();
+
+    return {
+      success: true,
+      message: `✅ Elección "${title}" creada con ID: ${electionId}`,
+      electionId
+    };
+  } catch (err) {
+    logAudit('createElection', data.adminAddress || 'unknown', data, 'error', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+// --- AGREGAR CANDIDATO ---
+function addCandidate(data) {
+  try {
+    const electionId = parseInt(data.electionId || data.election);
+    const name = (data.name || '').trim();
+    const party = (data.party || data.proposal || '').trim();
+
+    // Validaciones
+    if (!electionId || !name) {
+      throw new Error('Election ID y nombre son obligatorios');
+    }
+
+    const election = DATABASE.elections.find(e => e.electionId === electionId);
+    if (!election) {
+      throw new Error('Elección no encontrada');
+    }
+
+    // Generar candidateId
+    const existingCandidates = DATABASE.candidates.filter(c => c.electionId === electionId);
+    const candidateId = existingCandidates.length + 1;
+
+    // Crear candidato
+    const candidate = {
+      electionId,
+      candidateId,
+      name,
+      party,
+      votes: 0,
+      percentage: '0%',
+      addedAt: new Date().toISOString()
+    };
+
+    DATABASE.candidates.push(candidate);
+    logBlockchain('addCandidate', { electionId, candidateId, name, party });
+    logAudit('addCandidate', 'system', { electionId, name }, 'success');
+    saveDatabase();
+
+    return {
+      success: true,
+      message: '✅ Candidato agregado',
+      candidateId
+    };
+  } catch (err) {
+    logAudit('addCandidate', 'system', data, 'error', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+// --- REGISTRAR VOTO ---
+function recordVote(data) {
+  try {
+    const txHash = data.txHash || data.transactionHash || '';
+    const wallet = (data.walletAddress || data.voter || data.from || '').toLowerCase().trim();
+    const electionId = parseInt(data.electionId);
+    const candidateId = parseInt(data.candidateId);
+    const blockNumber = data.blockNumber || 0;
+    const gasUsed = data.gasUsed || 0;
+
+    // Validaciones
+    if (!wallet || !electionId || !candidateId) {
+      throw new Error('Datos incompletos para registrar voto');
+    }
+
+    // Verificar que no haya votado antes
+    const hasVoted = DATABASE.votes.some(v => 
+      v.walletAddress.toLowerCase() === wallet && v.electionId === electionId
+    );
+
+    if (hasVoted) {
+      throw new Error('El votante ya emitió su voto en esta elección');
+    }
+
+    // Verificar que el candidato existe
+    const candidate = DATABASE.candidates.find(c => 
+      c.electionId === electionId && c.candidateId === candidateId
+    );
+
+    if (!candidate) {
+      throw new Error('Candidato no encontrado');
+    }
+
+    // Registrar voto
+    const vote = {
+      txHash,
+      walletAddress: wallet,
+      electionId,
+      candidateId,
+      timestamp: new Date().toISOString(),
+      blockNumber,
+      gasUsed,
+      status: 'Confirmado'
+    };
+
+    DATABASE.votes.push(vote);
+    
+    // Actualizar conteos
+    updateCandidateVotes(electionId, candidateId);
+    updateElectionTotalVotes(electionId);
+
+    logBlockchain('castVote', { wallet, electionId, candidateId, txHash });
+    logAudit('castVote', wallet, { electionId, candidateId }, 'success');
+    updateStats();
+    saveDatabase();
+
+    return {
+      success: true,
+      message: '🗳️ Voto registrado correctamente',
+      txHash
+    };
+  } catch (err) {
+    logAudit('recordVote', data.walletAddress || 'unknown', data, 'error', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+// --- ACTUALIZAR CONTEO DE VOTOS DEL CANDIDATO ---
+function updateCandidateVotes(electionId) {
+  // Contar votos por candidato en esta elección
+  const voteCounts = {};
+  DATABASE.votes
+    .filter(v => v.electionId === electionId)
+    .forEach(v => {
+      voteCounts[v.candidateId] = (voteCounts[v.candidateId] || 0) + 1;
+    });
+
+  const totalVotes = Object.values(voteCounts).reduce((a, b) => a + b, 0);
+
+  // Actualizar cada candidato
+  DATABASE.candidates
+    .filter(c => c.electionId === electionId)
+    .forEach(candidate => {
+      const count = voteCounts[candidate.candidateId] || 0;
+      const percentage = totalVotes > 0 ? ((count / totalVotes) * 100).toFixed(2) : '0';
+      
+      candidate.votes = count;
+      candidate.percentage = percentage + '%';
+    });
+}
+
+// --- ACTUALIZAR TOTAL DE VOTOS DE ELECCIÓN ---
+function updateElectionTotalVotes(electionId) {
+  const totalVotes = DATABASE.votes.filter(v => v.electionId === electionId).length;
+  
+  const election = DATABASE.elections.find(e => e.electionId === electionId);
+  if (election) {
+    election.totalVotes = totalVotes;
+  }
+}
+
+// --- OBTENER ELECCIONES ACTIVAS ---
+function getActiveElections() {
+  try {
+    const activeElections = DATABASE.elections
+      .filter(e => e.status === 'Activa')
+      .map(e => ({
+        ElectionID: e.electionId,
+        Title: e.title,
+        Description: e.description,
+        StartDate: e.startDate,
+        EndDate: e.endDate,
+        Status: e.status,
+        TotalVotes: e.totalVotes,
+        ContractAddress: e.contractAddress
+      }));
+
+    return { success: true, elections: activeElections };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// --- OBTENER CANDIDATOS DE UNA ELECCIÓN ---
+function getCandidates(data) {
+  try {
+    const electionId = parseInt(data.electionId);
+    
+    if (!electionId) {
+      throw new Error('Election ID es obligatorio');
+    }
+
+    const electionCandidates = DATABASE.candidates
+      .filter(c => c.electionId === electionId)
+      .map(c => ({
+        CandidateID: c.candidateId,
+        Name: c.name,
+        Party: c.party,
+        Votes: c.votes,
+        Percentage: c.percentage
+      }));
+
+    return { success: true, candidates: electionCandidates };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// --- OBTENER RESULTADOS ---
+function getResults(data) {
+  try {
+    const electionId = parseInt(data.electionId);
+    
+    if (!electionId) {
+      throw new Error('Election ID es obligatorio');
+    }
+
+    const election = DATABASE.elections.find(e => e.electionId === electionId);
+    
+    if (!election) {
+      throw new Error('Elección no encontrada');
+    }
+
+    const results = DATABASE.candidates
+      .filter(c => c.electionId === electionId)
+      .map(c => ({
+        name: c.name,
+        party: c.party,
+        votes: c.votes,
+        percentage: parseFloat(c.percentage) || 0
+      }))
+      .sort((a, b) => b.votes - a.votes);
+
+    return {
+      success: true,
+      election: {
+        id: election.electionId,
+        title: election.title,
+        totalVotes: election.totalVotes
+      },
+      candidates: results
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// --- OBTENER ESTADÍSTICAS ---
+function getStats() {
+  try {
+    const stats = {
+      totalVoters: DATABASE.voters.length,
+      totalElections: DATABASE.elections.length,
+      totalVotes: DATABASE.votes.length,
+      totalCandidates: DATABASE.candidates.length,
+      lastUpdate: new Date().toISOString()
+    };
+
+    return { success: true, stats };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// --- LOGGING DE BLOCKCHAIN ---
+function logBlockchain(action, details) {
+  try {
+    const hash = uuidv4();
+    const blockNumber = DATABASE.blockchain.length;
+    
+    DATABASE.blockchain.push({
+      timestamp: new Date().toISOString(),
+      action,
+      details,
+      hash,
+      blockNumber
+    });
+  } catch (err) {
+    console.error('Error en logBlockchain:', err);
+  }
+}
+
+// --- LOGGING DE AUDITORÍA ---
+function logAudit(action, user, details, status, error = '') {
+  try {
+    DATABASE.audit.push({
+      timestamp: new Date().toISOString(),
+      action,
+      user,
+      details,
+      status,
+      error
+    });
+  } catch (err) {
+    console.error('Error en logAudit:', err);
+  }
+}
+
+// --- REGISTRAR LOG DEL RELAYER ---
+function logRelayer(data) {
+  try {
+    DATABASE.relayerLog.push({
+      timestamp: new Date().toISOString(),
+      from: data.from || '',
+      action: data.action || '',
+      status: data.status || '',
+      txHash: data.txHash || '',
+      gasUsed: data.gasUsed || 0
+    });
+    saveDatabase();
+  } catch (err) {
+    console.error('Error en logRelayer:', err);
+  }
+}
+
+// --- ACTUALIZAR ESTADÍSTICAS ---
+function updateStats() {
+  try {
+    const stats = getStats();
+    if (stats.success) {
+      DATABASE.stats = stats.stats;
+    }
+  } catch (err) {
+    console.error('Error actualizando stats:', err);
+  }
+}
+
+// --- DESPACHADOR DE ACCIONES ---
+function handleAction(action, data) {
+  const actions = {
+    'init': initializeSystem,
+    'registerVoter': () => registerVoter(data),
+    'createElection': () => createElection(data),
+    'addCandidate': () => addCandidate(data),
+    'recordVote': () => recordVote(data),
+    'castVote': () => recordVote(data), // Alias
+    'getActiveElections': getActiveElections,
+    'getCandidates': () => getCandidates(data),
+    'getResults': () => getResults(data),
+    'getStats': getStats,
+    'logRelayer': () => logRelayer(data)
+  };
+
+  if (actions[action]) {
+    return actions[action]();
+  } else {
+    throw new Error('Acción desconocida: ' + action);
+  }
+}
+
+// ============================================================
+// 🌐 RUTAS HTTP
+// ============================================================
+
+// GET - Health check
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: 'API Online',
+    timestamp: new Date().toISOString(),
+    version: '1.0.0'
   });
-})();
+});
+
+// GET - Con parámetros de query
+app.get('/api', (req, res) => {
+  try {
+    const action = req.query.action;
+    
+    if (!action) {
+      return res.json({
+        success: true,
+        message: 'API Online',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    const result = handleAction(action, req.query);
+    res.json(result);
+  } catch (err) {
+    console.error('Error en GET:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST - Recibir datos
+app.post('/api', async (req, res) => {
+  try {
+    const data = req.body;
+    const action = data.action;
+
+    if (!action) {
+      return res.status(400).json({
+        success: false,
+        error: 'Action es requerido'
+      });
+    }
+
+    const result = await handleAction(action, data);
+    res.json(result);
+  } catch (err) {
+    console.error('Error en POST:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Exportar base de datos (solo para desarrollo)
+app.get('/export', (req, res) => {
+  res.json({
+    success: true,
+    data: DATABASE,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Importar base de datos (solo para desarrollo)
+app.post('/import', (req, res) => {
+  try {
+    DATABASE = req.body;
+    saveDatabase();
+    res.json({ success: true, message: 'Base de datos importada' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Error handler global
+app.use((err, req, res, next) => {
+  console.error('Error no manejado:', err);
+  res.status(500).json({
+    success: false,
+    error: 'Error interno del servidor',
+    message: err.message
+  });
+});
+
+// ============================================================
+// 🚀 INICIAR SERVIDOR
+// ============================================================
+
+async function startServer() {
+  try {
+    await initializeSystem();
+    
+    app.listen(PORT, () => {
+      console.log(`
+╔═══════════════════════════════════════════════════════════╗
+║                                                           ║
+║  🗳️  Backend Server - Sistema de Votación                ║
+║                                                           ║
+╠═══════════════════════════════════════════════════════════╣
+║  Puerto:          ${PORT}                                    ║
+║  Modo:            Node.js Backend                         ║
+║  Base de datos:   ${CONFIG.DATA_DIR}                         ║
+║  Admins:          ${CONFIG.ADMIN_ADDRESSES.length} configurados            ║
+╚═══════════════════════════════════════════════════════════╝
+
+📊 Estadísticas:
+   - Votantes:    ${DATABASE.voters.length}
+   - Elecciones:  ${DATABASE.elections.length}
+   - Votos:       ${DATABASE.votes.length}
+   - Candidatos:  ${DATABASE.candidates.length}
+
+🌐 Endpoints disponibles:
+   - GET  http://localhost:${PORT}/
+   - GET  http://localhost:${PORT}/api?action=getStats
+   - POST http://localhost:${PORT}/api
+
+✨ Backend iniciado correctamente!
+      `);
+    });
+  } catch (err) {
+    console.error('❌ Error iniciando servidor:', err);
+    process.exit(1);
+  }
+}
+
+// Manejar cierre graceful
+process.on('SIGINT', async () => {
+  console.log('\n🛑 Cerrando servidor...');
+  await saveDatabase();
+  console.log('💾 Base de datos guardada');
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  await saveDatabase();
+  process.exit(0);
+});
+
+// Iniciar servidor
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = { app, DATABASE, handleAction };
