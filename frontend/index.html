@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>🗳️ Votación Blockchain Gasless — Dashboard</title>
+
+  <!-- Ethers -->
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.15.0/dist/ethers.umd.min.js"></script>
+
+  <!-- Chart.js 4.x -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- Define backend -->
+  <script>const BACKEND_URL = "http://localhost:3002/api";</script>
+
+  <!-- Frontend -->
+  <script defer src="frontend.js"></script>
+
+  <style>
+    :root{
+      --bg-1: #667eea;
+      --bg-2: #764ba2;
+      --muted: #666;
+      --card: #fff;
+      --glass: rgba(255,255,255,0.06);
+    }
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;}
+    body{
+      background: linear-gradient(135deg,var(--bg-1) 0%,var(--bg-2) 100%);
+      padding:20px;
+      color:#111827;
+    }
+    .container{max-width:1300px;margin:0 auto;}
+    .header{display:flex;justify-content:space-between;align-items:center;background:var(--card);padding:20px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,0.12);gap:12px;flex-wrap:wrap}
+    .logo{font-weight:800;color:var(--bg-1);font-size:20px}
+    .wallet-info{display:flex;align-items:center;gap:12px}
+
+    .status-badge{padding:6px 12px;border-radius:999px;font-weight:700;font-size:13px}
+    .status-disconnected{background:#fee2e2;color:#991b1b}
+    .status-connected{background:#d1fae5;color:#065f46}
+
+    .wallet-display{background:#f3f4f6;padding:8px 12px;border-radius:8px;font-family:monospace}
+
+    .btn{background:linear-gradient(135deg,var(--bg-1),var(--bg-2));color:white;border:0;padding:10px 16px;border-radius:8px;font-weight:700;cursor:pointer}
+    .btn:hover{transform:translateY(-2px)}
+    .btn:disabled{opacity:.6;cursor:not-allowed}
+
+    .btn-success{background:linear-gradient(135deg,#10b981,#059669)}
+    .btn-danger{background:linear-gradient(135deg,#ef4444,#dc2626)}
+    .btn-secondary{background:linear-gradient(135deg,#64748b,#475569);}
+
+    .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:16px;margin:18px 0}
+    .stat-card{background:var(--card);padding:18px;border-radius:10px;box-shadow:0 8px 20px rgba(0,0,0,0.08);text-align:center}
+    .stat-value{font-size:22px;font-weight:800;color:var(--bg-1)}
+    .stat-label{color:var(--muted);margin-top:6px;font-weight:600}
+
+    .tabs{display:flex;gap:10px;margin:18px 0;flex-wrap:wrap}
+    .tab{background:var(--card);padding:10px 16px;border-radius:10px;border:1px solid #eef2ff;cursor:pointer;font-weight:700;color:#374151}
+    .tab.active{background:linear-gradient(90deg,var(--bg-1),var(--bg-2));color:white;border:none}
+
+    .card{background:var(--card);padding:18px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,0.06);margin-bottom:18px}
+    .card h2{margin:0 0 10px 0;color:var(--bg-1)}
+
+    canvas{margin:15px 0;max-height:360px}
+
+    .notification{position:fixed;right:20px;top:20px;background:#fff;padding:14px;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.18);min-width:260px;display:none;z-index:9999}
+    .notification.show{display:block}
+    .notification.info{border-left:6px solid #3b82f6}
+    .notification.success{border-left:6px solid #10b981}
+    .notification.error{border-left:6px solid #ef4444}
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <!-- Header -->
+    <div class="header">
+      <div class="logo">🗳️ Votación Blockchain Gasless</div>
+
+      <div class="wallet-info">
+        <span id="statusBadge" class="status-badge status-disconnected">Desconectado</span>
+        <div class="wallet-display" id="walletDisplay">No conectado</div>
+        <button id="connectBtn" class="btn">Conectar MetaMask</button>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-grid" id="statsGrid">
+      <div class="stat-card"><div class="stat-value" id="statVoters">0</div><div class="stat-label">Votantes Registrados</div></div>
+      <div class="stat-card"><div class="stat-value" id="statElections">0</div><div class="stat-label">Elecciones Activas</div></div>
+      <div class="stat-card"><div class="stat-value" id="statVotes">0</div><div class="stat-label">Votos Emitidos</div></div>
+      <div class="stat-card"><div class="stat-value" id="statCandidates">0</div><div class="stat-label">Candidatos Totales</div></div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <div class="tab active" data-section="register" onclick="showSection('register')">📝 Registro</div>
+      <div class="tab" data-section="vote" onclick="showSection('vote')">🗳️ Votar</div>
+      <div class="tab" data-section="results" onclick="showSection('results')">📊 Resultados</div>
+      <div class="tab" data-section="dashboardVisual" onclick="showSection('dashboardVisual')">📈 Dashboard Visual</div>
+      <div class="tab" data-section="admin" onclick="showSection('admin')">⚙️ Admin</div>
+      <div class="tab" data-section="verify" onclick="showSection('verify')">🔍 Verificar</div>
+    </div>
+
+    <!-- Dashboard Visual -->
+    <div id="dashboardVisualSection" class="card section" style="display:none">
+      <h2>📈 Dashboard Visual — Gráficos</h2>
+
+      <canvas id="chartVoters"></canvas>
+      <canvas id="chartCandidates"></canvas>
+      <canvas id="chartParticipation"></canvas>
+      <canvas id="chartComparison"></canvas>
+      <canvas id="chartActivity"></canvas>
+    </div>
+
+    <!-- Register -->
+    <div id="registerSection" class="card section">
+      <h2>📝 Registro de Votante</h2>
+      <div class="form-group"><label>Wallet</label><input id="regWallet" readonly /></div>
+      <div class="form-group"><label>Nombre *</label><input id="regName" /></div>
+      <div class="form-group"><label>DNI *</label><input id="regID" /></div>
+      <div class="form-group"><label>Email</label><input id="regEmail" type="email" /></div>
+      <button id="registerBtn" class="btn btn-success">Registrar</button>
+    </div>
+
+    <!-- Vote -->
+    <div id="voteSection" class="card section" style="display:none">
+      <h2>🗳️ Votar</h2>
+      <div id="electionsContainer" class="loading-container">Cargando elecciones...</div>
+    </div>
+
+    <!-- Results -->
+    <div id="resultsSection" class="card section" style="display:none">
+      <h2>📊 Resultados</h2>
+      <select id="resultsElectionSelect"></select>
+      <div id="resultsContainer"></div>
+    </div>
+
+    <!-- Admin -->
+    <div id="adminSection" class="card section" style="display:none">
+      <h2>⚙️ Panel Admin</h2>
+      <input id="adminAddress" readonly placeholder="Wallet admin" />
+      <input id="electionTitle" placeholder="Título" />
+      <textarea id="electionDesc" placeholder="Descripción"></textarea>
+      <button id="createElectionBtn" class="btn btn-success">Crear</button>
+      <hr>
+      <button id="btnQueryDB" class="btn btn-secondary">Consultar BD</button>
+      <button id="btnResetDB" class="btn btn-danger">Resetear BD</button>
+      <button id="btnExportCSV" class="btn">CSV</button>
+      <button id="btnExportXLSX" class="btn">Excel</button>
+      <div id="dbQueryResult"></div>
+    </div>
+
+    <!-- Verify -->
+    <div id="verifySection" class="card section" style="display:none">
+      <h2>🔍 Verificar Transacción</h2>
+      <input id="txHashInput" placeholder="0x..." />
+      <button id="verifyTxBtn" class="btn">Verificar</button>
+      <button id="loadStatsBtn" class="btn btn-secondary">Estadísticas</button>
+      <div id="verificationResult"></div>
+    </div>
+  </div>
+
+  <!-- Notification -->
+  <div id="notification" class="notification info">
+    <div id="notificationMessage">Mensaje</div>
+  </div>
+
+  <script>
+    function showSection(name){
+      document.querySelectorAll('.section').forEach(s => s.style.display = 'none');
+      document.getElementById(name + 'Section').style.display = 'block';
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelector(`[data-section="${name}"]`).classList.add('active');
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      if (typeof connectWallet === 'function')
+        document.getElementById('connectBtn').addEventListener('click', connectWallet);
+
+      if (typeof registerVoter === 'function')
+        document.getElementById('registerBtn').addEventListener('click', registerVoter);
+
+      if (typeof loadStats === 'function') loadStats();
+      if (typeof loadActiveElections === 'function') loadActiveElections();
+    });
+  </script>
+</body>
+</html>
