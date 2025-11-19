@@ -168,6 +168,7 @@
     "object-inspect": "^1.13.4",
     "on-finished": "^2.4.1",
     "once": "^1.4.0",
+    "opt": "^0.1.14",
     "package-json-from-dist": "^1.0.1",
     "pako": "^1.0.11",
     "parseurl": "^1.3.3",
@@ -208,9 +209,9 @@
     "socket.io-parser": "^4.2.4",
     "ssf": "^0.11.2",
     "statuses": "^2.0.2",
+    "string_decoder": "^1.3.0",
     "string-width": "^5.1.2",
     "string-width-cjs": "^4.2.3",
-    "string_decoder": "^1.3.0",
     "strip-ansi": "^7.1.2",
     "strip-ansi-cjs": "^6.0.1",
     "supports-color": "^5.5.0",
@@ -243,12 +244,12 @@
     "xmlchars": "^2.2.0",
     "zip-stream": "^4.1.1"
   },
-  "devDependencies": {},
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "devDependencies": {}
 }
