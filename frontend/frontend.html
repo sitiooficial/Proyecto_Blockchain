@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sistema de Votación Blockchain</title>
+
+    <!-- ETHERS (v6) -->
+    <script src="https://cdn.jsdelivr.net/npm/ethers@6.15.0/dist/ethers.umd.min.js"></script>
+
+    
+
+   <!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🗳️ Sistema de Votación Blockchain Gasless</title>
+  <script src="https://cdn.ethers.io/lib/ethers-6.15.0.umd.min.js"></script>
+
+<!-- SOCKET.IO (cliente) -->
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+
+    <!-- BACKEND CONFIG -->
+    <script>
+        /* El backend real está en /api */
+        window.__BACKEND_URL = "http://localhost:3002/api"; 
+        window.__BASE_URL = "http://localhost:3002";
+    </script>
+      <!-- Ethers -->
+  
+  <!-- Chart.js 4.x -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- Define backend -->
+  <script>const BACKEND_URL = "http://localhost:3002/api";</script>
+
+  <!-- Frontend -->
+  <script defer src="frontend.js"></script>
+
+    <!-- BUNDLE GENERADO POR BROWSERIFY (CommonJS) -->
+   
+ <script defer src="voting.js"></script>
+ <script defer src="frontend.js"></script>
+<script defer src="index.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    header {
+      background: white;
+      padding: 30px;
+      border-radius: 15px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+      margin-bottom: 20px;
+      text-align: center;
+    }
+
+    header h1 {
+      color: #667eea;
+      margin-bottom: 10px;
+    }
+
+    header p {
+      color: #666;
+    }
+
+    nav {
+      background: white;
+      border-radius: 10px;
+      padding: 15px;
+      margin-bottom: 20px;
+      box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: center;
+    }
+
+    nav button {
+      background: #667eea;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      transition: all 0.3s;
+    }
+
+    nav button:hover {
+      background: #5568d3;
+      transform: translateY(-2px);
+    }
+
+    nav button.active {
+      background: #1e88e5;
+    }
+
+    .wallet-section {
+      background: white;
+      padding: 20px;
+      border-radius: 10px;
+      margin-bottom: 20px;
+      box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+    }
+
+    .wallet-status {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 15px;
+    }
+
+    .status-badge {
+      display: inline-block;
+      padding: 5px 15px;
+      border-radius: 20px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .status-connected {
+      background: #c6f6d5;
+      color: #22543d;
+    }
+
+    .status-disconnected {
+      background: #fed7d7;
+      color: #742a2a;
+    }
+
+    .btn {
+      background: #667eea;
+      color: white;
+      border: none;
+      padding: 12px 25px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 16px;
+      transition: all 0.3s;
+      font-weight: 600;
+    }
+
+    .btn:hover {
+      background: #5568d3;
+      transform: translateY(-2px);
+      box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+    }
+
+    .btn:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .btn-vote {
+      background: #48bb78;
+      width: 100%;
+    }
+
+    .btn-vote:hover {
+      background: #38a169;
+    }
+
+    section {
+      background: white;
+      padding: 30px;
+      border-radius: 10px;
+      box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+      display: none;
+      animation: fadeIn 0.3s ease-in;
+    }
+
+    section.active {
+      display: block;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: #2d3748;
+    }
+
+    input, select, textarea {
+      width: 100%;
+      padding: 12px;
+      border: 2px solid #e2e8f0;
+      border-radius: 8px;
+      font-size: 14px;
+      transition: border-color 0.3s;
+    }
+
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+
+    textarea {
+      min-height: 100px;
+      resize: vertical;
+    }
+
+    .alert {
+      padding: 15px 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      animation: slideIn 0.3s ease-out;
+    }
+
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateY(-10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .alert-success {
+      background: #c6f6d5;
+      color: #22543d;
+      border-left: 4px solid #38a169;
+    }
+
+    .alert-error {
+      background: #fed7d7;
+      color: #742a2a;
+      border-left: 4px solid #e53e3e;
+    }
+
+    .alert-info {
+      background: #bee3f8;
+      color: #2c5282;
+      border-left: 4px solid #3182ce;
+    }
+
+    .election-card {
+      background: #f7fafc;
+      padding: 20px;
+      border-radius: 10px;
+      margin-bottom: 20px;
+      border: 2px solid #e2e8f0;
+      transition: all 0.3s;
+    }
+
+    .election-card:hover {
+      border-color: #667eea;
+      box-shadow: 0 5px 15px rgba(102, 126, 234, 0.2);
+    }
+
+    .election-title {
+      font-size: 20px;
+      font-weight: 700;
+      color: #2d3748;
+      margin-bottom: 10px;
+    }
+
+    .election-info {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 15px;
+      margin: 15px 0;
+    }
+
+    .info-item {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .info-label {
+      color: #718096;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      margin-bottom: 5px;
+    }
+
+    .info-value {
+      color: #2d3748;
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .candidates-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+      gap: 15px;
+      margin-top: 20px;
+    }
+
+    .candidate-card {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      border: 2px solid #e2e8f0;
+      transition: all 0.3s;
+    }
+
+    .candidate-card:hover {
+      border-color: #667eea;
+      box-shadow: 0 3px 10px rgba(102, 126, 234, 0.2);
+    }
+
+    .candidate-name {
+      font-size: 16px;
+      font-weight: 600;
+      color: #2d3748;
+      margin-bottom: 8px;
+    }
+
+    .candidate-party {
+      color: #718096;
+      font-size: 14px;
+      margin-bottom: 10px;
+    }
+
+    .vote-bar {
+      background: #e2e8f0;
+      height: 8px;
+      border-radius: 4px;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+
+    .vote-bar-fill {
+      background: #667eea;
+      height: 100%;
+      transition: width 0.5s ease;
+    }
+
+    .vote-stats {
+      display: flex;
+      justify-content: space-between;
+      font-size: 14px;
+      color: #718096;
+      margin-bottom: 10px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 20px;
+    }
+
+    table th, table td {
+      padding: 12px;
+      text-align: left;
+      border-bottom: 1px solid #e2e8f0;
+    }
+
+    table th {
+      background: #f7fafc;
+      font-weight: 600;
+      color: #2d3748;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+    }
+
+    .spinner {
+      border: 4px solid #e2e8f0;
+      border-top: 4px solid #667eea;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 20px;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    @media (max-width: 768px) {
+      .container {
+        padding: 10px;
+      }
+      
+      .wallet-status {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      
+      .candidates-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🗳️ Sistema de Votación Blockchain Gasless</h1>
+      <p>Votación segura y transparente sin costos de gas</p>
+    </header>
+
+    <div class="wallet-section">
+      <div class="wallet-status">
+        <div>
+          <strong>Estado:</strong>
+          <span id="connectionStatus" class="status-badge status-disconnected">Desconectado</span>
+        </div>
+        <button id="connectWallet" class="btn">Conectar Wallet</button>
+      </div>
+      <div id="walletInfo" style="margin-top: 15px; display: none;">
+        <p><strong>Tu dirección:</strong> <span id="walletAddress"></span></p>
+        <p><strong>Red:</strong> <span id="networkName"></span></p>
+      </div>
+    </div>
+
+    <div id="alerts"></div>
+
+    <nav>
+      <button onclick="showSection('register')" class="active">📝 Registro</button>
+      <button onclick="showSection('vote')">🗳️ Votar</button>
+      <button onclick="showSection('results')">📊 Resultados</button>
+      <button onclick="showSection('admin')">⚙️ Admin</button>
+      <button onclick="showSection('stats')">📈 Estadísticas</button>
+    </nav>
+
+    <!-- Registro -->
+    <section id="register" class="active">
+      <h2>📝 Registro de Votante</h2>
+      <div class="form-group">
+        <label>Wallet Address *</label>
+        <input id="regWallet" type="text" placeholder="0x..." readonly>
+      </div>
+      <div class="form-group">
+        <label>Nombre Completo *</label>
+        <input id="regName" type="text" placeholder="Juan Pérez">
+      </div>
+      <div class="form-group">
+        <label>DNI / ID *</label>
+        <input id="regDni" type="text" placeholder="12345678">
+      </div>
+      <div class="form-group">
+        <label>Email</label>
+        <input id="regEmail" type="email" placeholder="correo@ejemplo.com">
+      </div>
+      <button class="btn" onclick="registerVoter()">Registrar Votante</button>
+      <div id="regResult"></div>
+    </section>
+
+    <!-- Votar -->
+    <section id="vote">
+      <h2>🗳️ Emitir Voto</h2>
+      <div id="electionsContainer" class="loading">
+        <div class="spinner"></div>
+        <p>Cargando elecciones...</p>
+      </div>
+    </section>
+
+    <!-- Resultados -->
+    <section id="results">
+      <h2>📊 Resultados</h2>
+      <div class="form-group">
+        <label>Seleccionar Elección</label>
+        <select id="resElectionSelect" onchange="loadResults()">
+          <option value="">-- Seleccionar --</option>
+        </select>
+      </div>
+      <div id="resultsContainer"></div>
+    </section>
+
+    <!-- Admin -->
+    <section id="admin">
+      <h2>⚙️ Panel de Administración</h2>
+      
+      <h3 style="margin-top: 0;">Crear Nueva Elección</h3>
+      <div class="form-group">
+        <label>Dirección Admin *</label>
+        <input id="adminAddress" type="text" placeholder="0x..." readonly>
+      </div>
+      <div class="form-group">
+        <label>Título de la Elección *</label>
+        <input id="electionTitle" type="text" placeholder="Elección Estudiantil 2025">
+      </div>
+      <div class="form-group">
+        <label>Descripción</label>
+        <textarea id="electionDesc" placeholder="Descripción de la elección..."></textarea>
+      </div>
+      <div class="form-group">
+        <label>Fecha de Inicio</label>
+        <input id="startDate" type="date">
+      </div>
+      <div class="form-group">
+        <label>Fecha de Fin</label>
+        <input id="endDate" type="date">
+      </div>
+      <button class="btn" onclick="createElection()">Crear Elección</button>
+      
+      <hr style="margin: 30px 0; border: 1px solid #e2e8f0;">
+      
+      <h3>Agregar Candidato</h3>
+      <div class="form-group">
+        <label>ID de Elección *</label>
+        <input id="candElectionId" type="number" placeholder="1">
+      </div>
+      <div class="form-group">
+        <label>Nombre del Candidato *</label>
+        <input id="candName" type="text" placeholder="María González">
+      </div>
+      <div class="form-group">
+        <label>Partido / Propuesta</label>
+        <input id="candParty" type="text" placeholder="Propuesta A">
+      </div>
+      <button class="btn" onclick="addCandidate()">Agregar Candidato</button>
+      
+      <div id="adminResult"></div>
+    </section>
+
+    <!-- Estadísticas -->
+    <section id="stats">
+      <h2>📈 Estadísticas del Sistema</h2>
+      <button class="btn" onclick="loadStats()">Actualizar Estadísticas</button>
+      <div id="statsContainer"></div>
+    </section>
+  </div>
+
+
+</body>
+</html>
